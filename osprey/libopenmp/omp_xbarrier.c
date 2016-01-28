@@ -3,24 +3,24 @@
 
  Copyright (C) 2014 University of Houston.
 
- 1. Redistributions of source code must retain the above copyright notice,
- this list of conditions and the following disclaimer.
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of version 2 of the GNU General Public License as
+ published by the Free Software Foundation.
 
- 2. Redistributions in binary form must reproduce the above copyright notice,
- this list of conditions and the following disclaimer in the documentation
- and/or other materials provided with the distribution.
+ This program is distributed in the hope that it would be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- POSSIBILITY OF SUCH DAMAGE.
+ Further, this software is distributed without any warranty that it is
+ free of the rightful claim of any third person regarding infringement
+ or the like.  Any license provided herein, whether implied or
+ otherwise, applies only to this software file.  Patent licenses, if
+ any, provided herein do not apply to combinations of this program with
+ other software, or any other product whatsoever.
+
+ You should have received a copy of the GNU General Public License along
+ with this program; if not, write the Free Software Foundation, Inc., 59
+ Temple Place - Suite 330, Boston MA 02111-1307, USA.
 
  Contact information:
  http://www.cs.uh.edu/~hpctools
@@ -29,6 +29,9 @@
 
 #include "omp_rtl.h"
 #include "omp_xbarrier.h"
+
+#include "ompt_rtl.h"
+
 
 omp_xbarrier_t __omp_xbarrier_type;
 void (*__ompc_xbarrier_wait)(omp_team_t *team);
@@ -435,15 +438,15 @@ void __ompc_xbarrier_tree_wait(omp_team_t *team)
 void __ompc_barrier_wait_select(omp_team_t *team, int needevent)
 {
   if(needevent) {
-    __ompc_set_state(THR_IBAR_STATE);
-    __ompc_event_callback(OMP_EVENT_THR_BEGIN_IBAR);
+	__ompc_ompt_set_state(THR_IBAR_STATE, ompt_state_wait_barrier_implicit, 0);
+    __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_IBAR, ompt_event_wait_barrier_begin);
   }
 
   (*barrier_func_ptr)(team);
 
   if(needevent) {
-    __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-    __ompc_set_state(THR_WORK_STATE);
+	__ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+	__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
   }
 }
 #endif

@@ -63,6 +63,10 @@ typedef struct {
    ompc_lock_t      lock, wait;
    pthread_t       thread_id;
    int             count;
+
+#ifdef OMPT
+   int				max_count;
+#endif
 } ompc_nest_lock_t;
 
 #endif

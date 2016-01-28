@@ -353,7 +353,9 @@ typedef enum {
 
   MPR_OMP_WORKSHARE             = 85,
   MPR_OMP_END_WORKSHARE         = 86,
-  MPRUNTIME_LAST = MPR_OMP_END_WORKSHARE
+
+  MPR_OMP_LOOP_EXIT				= 87,
+  MPRUNTIME_LAST = MPR_OMP_LOOP_EXIT
 } MPRUNTIME;
 
 
@@ -778,6 +780,8 @@ static const char *mpr_names [MPRUNTIME_LAST + 1] = {
   "__ompc_task_will_defer",    /* MPR_OMP_TASK_WILL_DEFER */
   "__ompc_workshare",           /* MPR_OMP_WORKSHARE */
   "__ompc_end_workshare",       /* MPR_OMP_END_WORKSHARE */
+
+  "__ompc_loop_exit",           /* MPR_OMP_LOOP_EXIT */
 };
 
 
@@ -878,6 +882,8 @@ static ST_IDX mpr_sts [MPRUNTIME_LAST + 1] = {
 
   ST_IDX_ZERO,   /* MPR_OMP_WORKSHARE */
   ST_IDX_ZERO,   /* MPR_OMP_END_WORKSHARE */
+
+  ST_IDX_ZERO,   /* MPR_OMP_LOOP_EXIT */
 };
 
 #define MPSP_STATUS_PREG_NAME "mpsp_status"
@@ -3005,12 +3011,6 @@ is inheriting pu_recursive OK?
   Set_PU_is_nested_func(pu);
   Set_PU_mp(pu);
   Set_PU_has_mp(pu);
-  //by Daniel Tian, for OpenMP&OpenACC hybrid programming
-  if(PU_acc(Get_Current_PU()))
-  	Set_PU_acc(pu);
-  if(PU_has_acc(Get_Current_PU()))
-  	Set_PU_has_acc(pu);
-  ////////////////////////////////////////////////////
   if (is_task_region)
     Set_PU_is_task(pu);
 #ifdef KEY
@@ -3040,7 +3040,6 @@ is inheriting pu_recursive OK?
   Set_ST_addr_passed(parallel_proc);
 
   Allocate_Object ( parallel_proc );
-  Set_ST_sfname_idx(parallel_proc, Save_Str(Src_File_Name));
 
 
   // create nested symbol table for parallel function
@@ -10125,6 +10124,19 @@ Rewrite_Collapsed_Do ( WN * block, WN * do_tree, vector<BOOL>& is_LE, WN ** last
 }
 
 /*
+Generate RT call to terminate a loop.
+*/
+static WN *
+Gen_Loop_Exit ()
+{
+  WN * wn;
+  wn = WN_Create(OPC_VCALL, 0 );
+  WN_st_idx(wn) = GET_MPRUNTIME_ST(MPR_OMP_LOOP_EXIT);
+  return wn;
+}
+
+
+/*
 Transform do statement. This is a new version
 written by csc.
 Note: call Make_Local_Temps( ) before this.
@@ -10915,6 +10927,8 @@ Transform_Do( WN * do_tree,
   WN_INSERT_BlockLast( return_wn, do_prefix );
   WN_INSERT_BlockLast( return_wn, do_tree );
   WN_INSERT_BlockLast( return_wn, do_suffix );
+
+  WN_INSERT_BlockLast( return_wn, Gen_Loop_Exit());
 
 #ifndef KEY
 // Move the call to ompc_barrier down. We are not yet done handling the

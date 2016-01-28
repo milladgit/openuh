@@ -3,24 +3,24 @@
 
  Copyright (C) 2014 University of Houston.
 
- 1. Redistributions of source code must retain the above copyright notice,
- this list of conditions and the following disclaimer.
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of version 2 of the GNU General Public License as
+ published by the Free Software Foundation.
 
- 2. Redistributions in binary form must reproduce the above copyright notice,
- this list of conditions and the following disclaimer in the documentation
- and/or other materials provided with the distribution.
+ This program is distributed in the hope that it would be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- POSSIBILITY OF SUCH DAMAGE.
+ Further, this software is distributed without any warranty that it is
+ free of the rightful claim of any third person regarding infringement
+ or the like.  Any license provided herein, whether implied or
+ otherwise, applies only to this software file.  Patent licenses, if
+ any, provided herein do not apply to combinations of this program with
+ other software, or any other product whatsoever.
+
+ You should have received a copy of the GNU General Public License along
+ with this program; if not, write the Free Software Foundation, Inc., 59
+ Temple Place - Suite 330, Boston MA 02111-1307, USA.
 
  Contact information:
  http://www.cs.uh.edu/~hpctools
@@ -34,6 +34,9 @@
 #include "omp_sys.h"
 #include "omp_lock.h"
 #include "pcl.h"
+
+#include "ompt.h"
+
 
 #define OMP_TASK_STACK_SIZE_DEFAULT     0x010000L /* 64 KB */
 #define OMP_TASK_Q_UPPER_LIMIT_DEFAULT 10
@@ -98,9 +101,41 @@ struct omp_task {
   struct omp_task *prev;
   struct omp_task *next;
 
+#ifdef USE_COLLECTOR_TASK
+	#ifdef OMPT
+  	  ompt_task_id_t task_id;
+	#else
+  	  int task_id;
+	#endif
+#endif
+
+  ompc_lock_t lock;
+
   omp_task_flags_t flags;
+
+
+#ifdef OMPT
+  ompt_frame_t frame_s;
+#endif
+
 } __attribute__ ((__aligned__(CACHE_LINE_SIZE)));
 typedef struct omp_task omp_task_t;
+
+
+#ifdef OMPT
+static volatile ompt_task_id_t __ompt_task_id_counter = 1;
+static pthread_mutex_t __ompt_task_id_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+static inline ompt_task_id_t __ompt_task_id_generator()
+{
+    pthread_mutex_lock(&__ompt_task_id_counter_mutex);
+    ompt_task_id_t r = __ompt_task_id_counter++;
+    pthread_mutex_unlock(&__ompt_task_id_counter_mutex);
+    return r;
+}
+
+extern __thread omp_task_t *__omp_current_task;
+#endif
+
 
 /* inline functions */
 
@@ -234,6 +269,12 @@ static inline omp_task_t *__ompc_task_new_implicit(void)
   __ompc_task_set_flags(new_task, OMP_TASK_IS_TIED);
   new_task->state = OMP_TASK_RUNNING;
 
+#ifdef OMPT
+  new_task->task_id = __ompt_task_id_generator();
+  __omp_current_task = new_task;
+  __ompt_event_callback(ompt_event_initial_task_begin);
+#endif
+
   return new_task;
 }
 
@@ -247,12 +288,21 @@ static inline omp_task_t *__ompc_task_new(void)
 
   new_task->state = OMP_TASK_UNSCHEDULED;
 
+#ifdef OMPT
+  new_task->task_id = __ompt_task_id_generator();
+#endif
+
   return new_task;
 }
 
 static inline void __ompc_task_delete(omp_task_t *task)
 {
   Is_True(task != NULL, ("tried to delete a NULL task"));
+
+#ifdef OMPT
+  if(__ompc_task_is_implicit(task))
+	  __ompt_event_callback(ompt_event_initial_task_end);
+#endif
 
   aligned_free(task);
 }
@@ -278,6 +328,7 @@ __ompc_task_set_firstprivates(omp_task_t *task, void *firstprivates)
 
 /* global variables extern declarations */
 extern __thread omp_task_t *__omp_current_task;
+extern __thread omp_task_t *__omp_collector_task;
 extern int (*__ompc_task_cutoff)( void );
 
 extern __thread unsigned long __omp_task_cutoffs;

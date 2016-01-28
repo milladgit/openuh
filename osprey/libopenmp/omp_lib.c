@@ -43,6 +43,8 @@
 #include "omp_lock.h" 
 #include "omp_util.h"
 
+#include "ompt_rtl.h"
+
 #include <sys/time.h>
 
 void
@@ -174,7 +176,12 @@ omp_init_lock(volatile omp_lock_t *lock)
 
   tmp_lp->flag = __omp_spin_user_lock;
   __ompc_init_lock(tmp_lp);
-  (*lock) = (omp_lock_t)tmp_lp; 
+  (*lock) = (omp_lock_t)tmp_lp;
+
+#ifdef OMPT
+  __ompc_get_current_v_thread()->wait_id = (ompt_wait_id_t) lock;
+  __ompc_ompt_event_callback(0, ompt_event_init_lock);
+#endif
 }
 
 
@@ -190,6 +197,10 @@ omp_init_nest_lock(volatile omp_nest_lock_t *lock)
   Is_True(tmp_lp != NULL, "can not allocate tmp_lp");
   __ompc_init_nest_lock(tmp_lp);
   (*lock) = (omp_nest_lock_t)tmp_lp; 
+#ifdef OMPT
+  __ompc_get_current_v_thread()->wait_id = (ompt_wait_id_t) lock;
+  __ompc_ompt_event_callback(0, ompt_event_init_nest_lock);
+#endif
 }
 
 
@@ -199,6 +210,11 @@ void omp_init_nest_lock_(volatile omp_nest_lock_t *);
 void
 omp_destroy_lock(volatile omp_lock_t *lock)
 {
+#ifdef OMPT
+  __ompc_get_current_v_thread()->wait_id = (ompt_wait_id_t) lock;
+  __ompc_ompt_event_callback(0, ompt_event_destroy_lock);
+#endif
+
   __ompc_destroy_lock((ompc_lock_t*)(*lock));
   aligned_free((ompc_lock_t*)(*lock)); 
 }
@@ -209,6 +225,11 @@ void omp_destroy_lock_(volatile omp_lock_t *);
 void
 omp_destroy_nest_lock(volatile omp_nest_lock_t *lock)
 {
+#ifdef OMPT
+  __ompc_get_current_v_thread()->wait_id = (ompt_wait_id_t) lock;
+  __ompc_ompt_event_callback(0, ompt_event_destroy_nest_lock);
+#endif
+
   __ompc_destroy_nest_lock((ompc_nest_lock_t*)(*lock));
   aligned_free((ompc_nest_lock_t*)(*lock)); 
 }
@@ -216,59 +237,68 @@ omp_destroy_nest_lock(volatile omp_nest_lock_t *lock)
 
 void omp_destroy_nest_lock_(volatile omp_nest_lock_t *);
 #pragma weak omp_destroy_nest_lock_ = omp_destroy_nest_lock
+
+
 void
 omp_set_lock(volatile omp_lock_t *lock)
 {
   __ompc_lock((ompc_lock_t*)(*lock));
 }
 
-
 void omp_set_lock_(volatile omp_lock_t *);
 #pragma weak omp_set_lock_ = omp_set_lock
+
+
 void
 omp_set_nest_lock(volatile omp_nest_lock_t *lock)
 {
   __ompc_nest_lock((ompc_nest_lock_t*)(*lock));
 }
 
-
 void omp_set_nest_lock_(volatile omp_nest_lock_t *);
 #pragma weak omp_set_nest_lock_ = omp_set_nest_lock
+
+
 void
 omp_unset_lock(volatile omp_lock_t *lock)
 {
   __ompc_unlock((ompc_lock_t*)(*lock));
 }
 
-
 void omp_unset_lock_(volatile omp_lock_t *);
 #pragma weak omp_unset_lock_ = omp_unset_lock
+
+
 void
 omp_unset_nest_lock(volatile omp_nest_lock_t *lock)
 {
   __ompc_nest_unlock((ompc_nest_lock_t*)(*lock));
 }
 
-
 void omp_unset_nest_lock_(volatile omp_nest_lock_t *);
 #pragma weak omp_unset_nest_lock_ = omp_unset_nest_lock
+
+
 int
 omp_test_lock(volatile omp_lock_t *lock)
 {
   return __ompc_test_lock((ompc_lock_t*)(*lock));
 }
 
-
 int omp_test_lock_(volatile omp_lock_t *);
 #pragma weak omp_test_lock_ = omp_test_lock
+
+
 int
 omp_test_nest_lock(volatile omp_nest_lock_t *lock){
   return __ompc_test_nest_lock((ompc_nest_lock_t*)(*lock));
 }
-	
 
 int omp_test_nest_lock_(volatile omp_nest_lock_t *);
 #pragma weak omp_test_nest_lock_ = omp_test_nest_lock
+
+
+
 /*
  * Timer function
  */

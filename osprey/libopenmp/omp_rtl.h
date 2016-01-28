@@ -1,9 +1,5 @@
 /*
- * Copyright (C) 2009-2014 University of Houston.  All Rights Reserved.
- */
-
-/*
- * Copyright (C) 2009 Advanced Micro Devices, Inc.  All Rights Reserved.
+ * Copyright (C) 2009-2014 Advanced Micro Devices, Inc.  All Rights Reserved.
  */
 
 /*
@@ -47,6 +43,7 @@
 #ifndef __omp_rtl_basic_included
 #define __omp_rtl_basic_included
 
+
 #include "omp_util.h"
 #include "omp_type.h"
 #include <pthread.h>
@@ -57,7 +54,6 @@
 #include "omp_task_pool.h"
 #include "omp_sys.h"
 #include "omp_xbarrier.h"
-
 
 /* default setting values*/
 #define OMP_NESTED_DEFAULT	0	
@@ -262,7 +258,19 @@ struct omp_team {
 
   omp_xbarrier_info_t  xbarrier_info;
 
+#ifdef OMPT
+  volatile ompt_task_id_t collector_task_id;
+#else
+  volatile int collector_task_id;
+#endif
+
   callback callbacks[OMP_EVENT_THR_END_ATWT+1];
+
+  // OMPT
+#ifdef OMPT
+  uint64_t parallel_region_id;  // team id
+  omp_team_t *parent;
+#endif
 
 } __attribute__ ((__aligned__(CACHE_LINE_SIZE_L2L3)));
 
@@ -305,6 +313,13 @@ struct omp_v_thread {
 
   /* Maybe a few more bytes should be here for alignment.*/
   /* TODO: stuff bytes*/
+
+  ompt_wait_id_t wait_id;
+#ifdef OMPT
+  ompt_thread_type_t type;
+  char *idle_frame;
+#endif
+
 } __attribute__ ((__aligned__(CACHE_LINE_SIZE)));
 
 /* The array for level 1 thread team, 

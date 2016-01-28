@@ -3,27 +3,24 @@
 
  Copyright (C) 2014 University of Houston.
 
- Redistribution and use in source and binary forms, with or without
- modification, are permitted provided that the following conditions are met:
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of version 2 of the GNU General Public License as
+ published by the Free Software Foundation.
 
- 1. Redistributions of source code must retain the above copyright notice,
- this list of conditions and the following disclaimer.
+ This program is distributed in the hope that it would be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
- 2. Redistributions in binary form must reproduce the above copyright notice,
- this list of conditions and the following disclaimer in the documentation
- and/or other materials provided with the distribution.
+ Further, this software is distributed without any warranty that it is
+ free of the rightful claim of any third person regarding infringement
+ or the like.  Any license provided herein, whether implied or
+ otherwise, applies only to this software file.  Patent licenses, if
+ any, provided herein do not apply to combinations of this program with
+ other software, or any other product whatsoever.
 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- POSSIBILITY OF SUCH DAMAGE.
+ You should have received a copy of the GNU General Public License along
+ with this program; if not, write the Free Software Foundation, Inc., 59
+ Temple Place - Suite 330, Boston MA 02111-1307, USA.
 
  Contact information:
  http://www.cs.uh.edu/~hpctools
@@ -35,7 +32,7 @@
 #include "omp_collector_api.h"
 #include <assert.h>
 
-char OMP_EVENT_NAME[22][50]= {
+char OMP_EVENT_NAME[35][50]= {
   "OMP_EVENT_FORK",
   "OMP_EVENT_JOIN",
   "OMP_EVENT_THR_BEGIN_IDLE",
@@ -57,10 +54,23 @@ char OMP_EVENT_NAME[22][50]= {
   "OMP_EVENT_THR_BEGIN_ORDERED",
   "OMP_EVENT_THR_END_ORDERED",
   "OMP_EVENT_THR_BEGIN_ATWT",
-  "OMP_EVENT_THR_END_ATWT" };
+  "OMP_EVENT_THR_END_ATWT",
+  "OMP_EVENT_THR_BEGIN_CREATE_TASK",
+  "OMP_EVENT_THR_END_CREATE_TASK_IMM",
+  "OMP_EVENT_THR_END_CREATE_TASK_DEL",
+  "OMP_EVENT_THR_BEGIN_SCHD_TASK",
+  "OMP_EVENT_THR_END_SCHD_TASK",
+  "OMP_EVENT_THR_BEGIN_SUSPEND_TASK",
+  "OMP_EVENT_THR_END_SUSPEND_TASK",
+  "OMP_EVENT_THR_BEGIN_STEAL_TASK",
+  "OMP_EVENT_THR_END_STEAL_TASK",
+  "OMP_EVENT_THR_FETCHED_TASK",
+  "OMP_EVENT_THR_BEGIN_EXEC_TASK",
+  "OMP_EVENT_THR_BEGIN_FINISH_TASK",
+  "OMP_EVENT_THR_END_FINISH_TASK" };
 
 
-char OMP_STATE_NAME[11][50]= {
+char OMP_STATE_NAME[16][50]= {
   "THR_OVHD_STATE",          /* Overhead */
   "THR_WORK_STATE",          /* Useful work, excluding reduction, master, single, critical */
   "THR_IBAR_STATE",          /* In an implicit barrier */
@@ -71,7 +81,12 @@ char OMP_STATE_NAME[11][50]= {
   "THR_LKWT_STATE",          /* Waiting for lock */
   "THR_CTWT_STATE",          /* Waiting to enter critical region */
   "THR_ODWT_STATE",          /* Waiting to execute an ordered region */
-  "THR_ATWT_STATE"};         /* Waiting to enter an atomic region */
+  "THR_ATWT_STATE",          /* Waiting to enter an atomic region */
+  "THR_TASK_CREATE_STATE",   /* Creating new explicit task */
+  "THR_TASK_SCHEDULE_STATE", /* Waiting to enter an atomic region */
+  "THR_TASK_SUSPEND_STATE",  /* Suspending current explicit task */
+  "THR_TASK_STEAL_STATE",    /* Stealing explicit task */
+  "THR_TASK_FINISH_STATE"};
 
 int __omp_collector_api(void *arg);
 
@@ -84,6 +99,10 @@ int process_top_request(omp_collector_message * req);
 int register_event(omp_collector_message * req);
 int unregister_event(omp_collector_message *req);
 int return_state(omp_collector_message *req);
+#ifdef USE_COLLECTOR_TASK
+int return_task_info(omp_collector_message *req);
+int return_parent_task_info(omp_collector_message *req);
+#endif
 int return_current_prid(omp_collector_message *req);
 int return_parent_prid(omp_collector_message *req);
 
@@ -188,7 +207,7 @@ void __ompc_req_start(omp_collector_message *req)
   int i;
   
   if(!collector_initialized) {
-    for (i=0; i< OMP_EVENT_THR_END_ATWT+1; i++) {
+    for (i=0; i< OMP_EVENT_THR_END_FINISH_TASK+1; i++) {
       __ompc_lock_spinlock(&event_lock);
       __omp_level_1_team_manager.callbacks[i]= NULL;
       __ompc_unlock_spinlock(&event_lock);
@@ -296,6 +315,16 @@ int process_top_request(omp_collector_message *req)
     __ompc_req_resume(req);
     break;
 
+#ifdef USE_COLLECTOR_TASK
+  case OMP_REQ_TASK_ID:
+    return_task_info(req);
+    break;
+
+  case OMP_REQ_TASK_PID:
+    return_parent_task_info(req);
+    break;
+#endif
+
   default:
     *(req->ec) = OMP_ERRCODE_UNKNOWN;
     *(req->rsz) = 0;   
@@ -308,11 +337,62 @@ int process_top_request(omp_collector_message *req)
 int event_is_valid(OMP_COLLECTORAPI_EVENT e)
 {
   /* this needs to be improved with something more portable when we extend the events in the runtime */
-  if (e>=OMP_EVENT_FORK && e<=OMP_EVENT_THR_END_ATWT)
-    return 1; 
+  if (e>=OMP_EVENT_FORK && e<=OMP_EVENT_THR_END_FINISH_TASK)
+    return 1;
   else
     return 0;
 }
+
+#ifdef USE_COLLECTOR_TASK
+
+int return_task_info(omp_collector_message *req)
+{
+  if(!collector_initialized) {
+    *(req->rsz)=0;
+    *(req->ec)=OMP_ERRCODE_SEQUENCE_ERR;
+    return 0;
+  }
+
+  if((req->sz - 4*sizeof(int)) < sizeof(int)) {
+      *(req->rsz)=0;
+      *(req->ec) = OMP_ERRCODE_MEM_TOO_SMALL;
+      return 0;
+  } else {
+      if(__omp_collector_task != NULL) {
+          *((int *)req->mem) = __omp_collector_task->task_id;
+      }
+      else {
+          *((int *)req->mem) = -1;
+      }
+      *(req->rsz)=sizeof(int);
+  }
+  return 1;
+}
+
+int return_parent_task_info(omp_collector_message *req)
+{
+  if(!collector_initialized) {
+    *(req->rsz)=0;
+    *(req->ec)=OMP_ERRCODE_SEQUENCE_ERR;
+    return 0;
+  }
+
+  if((req->sz - 4*sizeof(int)) < sizeof(int)) {
+   *(req->rsz)=0;
+   *(req->ec) = OMP_ERRCODE_MEM_TOO_SMALL;
+   return 0;
+  } else {
+      if(__omp_collector_task != NULL) {
+          *((int *)req->mem) = __omp_collector_task->parent->task_id;
+      } else {
+          *((int *)req->mem) = -1;
+      }
+      *(req->rsz)=sizeof(int);
+  }
+  return 1;
+}
+
+#endif
 
 int event_is_supported(OMP_COLLECTORAPI_EVENT e)
 {

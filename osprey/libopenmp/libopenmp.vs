@@ -1,5 +1,7 @@
 LIBOPENMP_1.0 {
  global:
+ 	ompt_initialize;
+    ompt_lookup;
     __omp_collector_api;
     __ompc_barrier;
     __ompc_can_fork;
@@ -34,6 +36,7 @@ LIBOPENMP_1.0 {
     __ompc_static_fini;
     __ompc_static_init_4;
     __ompc_static_init_8;
+    __ompc_loop_exit;
     __ompc_sug_numthreads;
     __ompc_cur_numthreads;
     __ompc_reduction;

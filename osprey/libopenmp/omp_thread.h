@@ -1,8 +1,4 @@
 /*
- * Copyright (C) 2014 University of Houston.  All Rights Reserved.
- */
-
-/*
  * Copyright (C) 2009-2010 Advanced Micro Devices, Inc.  All Rights Reserved.
  */
 
@@ -412,34 +408,34 @@ inline void __ompc_barrier(void)
   omp_v_thread_t *temp_v_thread;
   omp_v_thread_t *p_vthread = __ompc_get_v_thread_by_num( __omp_myid);
   p_vthread->thr_ibar_state_id++;
-  __ompc_set_state(THR_IBAR_STATE);
-  __ompc_event_callback(OMP_EVENT_THR_BEGIN_IBAR); 
+  __ompc_ompt_set_state(THR_IBAR_STATE, ompt_state_wait_barrier_implicit, 0);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_IBAR, ompt_event_wait_barrier_begin);
 
   if (__omp_exe_mode & OMP_EXE_MODE_NORMAL) {
     __ompc_xbarrier_wait(&__omp_level_1_team_manager);
-    __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-    __ompc_set_state(THR_WORK_STATE);
+	__ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+	__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
     return;
     //		}
     //		else
     //			return;
   } else if (__omp_exe_mode & OMP_EXE_MODE_SEQUENTIAL) {
-    __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-    __ompc_set_state(THR_WORK_STATE); 
+	__ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+	__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
    return;
    }
   /* other situations*/
   temp_v_thread = __ompc_get_current_v_thread();
   if(temp_v_thread->team_size == 1) {
-    __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-    __ompc_set_state(THR_WORK_STATE);
+	__ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+	__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
     return;
   }
   else {
     __ompc_barrier_wait(temp_v_thread->team);
   }
-__ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-__ompc_set_state(THR_WORK_STATE);
+__ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
 }
 
 void __ompc_ebarrier(void)
@@ -447,36 +443,36 @@ void __ompc_ebarrier(void)
     omp_v_thread_t *temp_v_thread;
    omp_v_thread_t *p_vthread = __ompc_get_v_thread_by_num( __omp_myid);
     p_vthread->thr_ebar_state_id++;
-  __ompc_set_state(THR_EBAR_STATE);
-  __ompc_event_callback(OMP_EVENT_THR_BEGIN_EBAR);
+	__ompc_ompt_set_state(THR_EBAR_STATE, ompt_state_wait_barrier_explicit, 0);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_EBAR, ompt_event_wait_barrier_begin);
   if (__omp_exe_mode & OMP_EXE_MODE_NORMAL) {
     //          if (__omp_level_1_team_size != 1)
     //          {
     __ompc_xbarrier_wait(&__omp_level_1_team_manager);
-    __ompc_event_callback(OMP_EVENT_THR_END_EBAR);
-    __ompc_set_state(THR_WORK_STATE);
+	__ompc_ompt_event_callback(OMP_EVENT_THR_END_EBAR, ompt_event_wait_barrier_end);
+	__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
     return;
     //          }
     //          else 
     //                  return;
                      
   } else if (__omp_exe_mode & OMP_EXE_MODE_SEQUENTIAL) {
-     __ompc_event_callback(OMP_EVENT_THR_END_EBAR);
-      __ompc_set_state(THR_WORK_STATE);
+	  __ompc_ompt_event_callback(OMP_EVENT_THR_END_EBAR, ompt_event_wait_barrier_end);
+	  __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
      return;
     }
   /* other situations*/
   temp_v_thread = __ompc_get_current_v_thread();
   if(temp_v_thread->team_size == 1) {
-    __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-    __ompc_set_state(THR_WORK_STATE);
+	__ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+	__ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
     return;
   }
   else {
     __ompc_barrier_wait(temp_v_thread->team);
   }
-  __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
-  __ompc_set_state(THR_WORK_STATE);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_wait_barrier_end);
+  __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
 }
 
 /* Exposed API should be moved to somewhere else, instead of been inlined*/

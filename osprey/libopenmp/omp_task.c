@@ -3,24 +3,24 @@
 
  Copyright (C) 2014 University of Houston.
 
- 1. Redistributions of source code must retain the above copyright notice,
- this list of conditions and the following disclaimer.
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of version 2 of the GNU General Public License as
+ published by the Free Software Foundation.
 
- 2. Redistributions in binary form must reproduce the above copyright notice,
- this list of conditions and the following disclaimer in the documentation
- and/or other materials provided with the distribution.
+ This program is distributed in the hope that it would be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- POSSIBILITY OF SUCH DAMAGE.
+ Further, this software is distributed without any warranty that it is
+ free of the rightful claim of any third person regarding infringement
+ or the like.  Any license provided herein, whether implied or
+ otherwise, applies only to this software file.  Patent licenses, if
+ any, provided herein do not apply to combinations of this program with
+ other software, or any other product whatsoever.
+
+ You should have received a copy of the GNU General Public License along
+ with this program; if not, write the Free Software Foundation, Inc., 59
+ Temple Place - Suite 330, Boston MA 02111-1307, USA.
 
  Contact information:
  http://www.cs.uh.edu/~hpctools
@@ -29,6 +29,9 @@
 
 #include "omp_rtl.h"
 #include "omp_task.h"
+#include "omp_collector_util.h"
+
+#include "ompt_rtl.h"
 
 /* Description: Implements a breadth-first task scheduler for OpenMP 3.0
  * tasks. When a task is created with may_delay != 0, it is added to the task
@@ -65,6 +68,7 @@
 
 /* global variables, function pointers */
 __thread omp_task_t *__omp_current_task;
+__thread omp_task_t *__omp_collector_task;
 
 cond_func __ompc_task_cutoff;
 
@@ -108,9 +112,21 @@ void __ompc_task_create(omp_task_func taskfunc, void *frame_pointer,
     /* not reached */
   }
 
+
   myid = __omp_myid;
   current_thread = __omp_current_v_thread;
   team = current_thread->team;
+
+#ifdef USE_COLLECTOR_TASK
+  OMP_COLLECTOR_API_THR_STATE temp_state =
+      (OMP_COLLECTOR_API_THR_STATE)current_thread->state;
+  __ompc_set_state(THR_TASK_CREATE_STATE);
+  __ompc_event_callback(OMP_EVENT_THR_BEGIN_CREATE_TASK);
+
+#ifndef OMPT
+  int new_id = __ompc_atomic_inc(&team->collector_task_id);
+#endif
+#endif
 
   if (may_delay) {
     new_task = __ompc_task_new();
@@ -120,6 +136,15 @@ void __ompc_task_create(omp_task_func taskfunc, void *frame_pointer,
     new_task->creating_thread_id = myid;
     new_task->parent = current_task;
     new_task->depth = current_task->depth + 1;
+
+#ifdef USE_COLLECTOR_TASK
+#ifndef OMPT
+    new_task->task_id = new_id;
+#endif
+    __omp_collector_task = new_task;
+    __ompc_event_callback(OMP_EVENT_THR_END_CREATE_TASK_DEL);
+    __ompc_set_state(temp_state);
+#endif
 
     __ompc_task_set_flags(new_task, OMP_TASK_IS_DEFERRED);
 
@@ -132,6 +157,10 @@ void __ompc_task_create(omp_task_func taskfunc, void *frame_pointer,
       __ompc_task_set_flags(new_task, OMP_TASK_BLOCKS_PARENT);
       __ompc_atomic_inc(&current_task->num_blocking_children);
     }
+
+#ifdef OMPT
+    __ompt_event_callback(ompt_event_task_begin);
+#endif
 
     if (__ompc_add_task_to_pool(team->task_pool, new_task) == 0) {
       /* couldn't add to task pool, so execute it immediately */
@@ -154,8 +183,21 @@ void __ompc_task_create(omp_task_func taskfunc, void *frame_pointer,
     new_task->parent = current_task;
     new_task->depth = current_task->depth + 1;
 
+#ifdef USE_COLLECTOR_TASK
+#ifndef OMPT
+    new_task->task_id = new_id;
+#endif
+    __omp_collector_task = new_task;
+    __ompc_event_callback(OMP_EVENT_THR_END_CREATE_TASK_IMM);
+#endif
+
     if (is_tied)
       __ompc_task_set_flags(new_task, OMP_TASK_IS_TIED);
+
+
+#ifdef OMPT
+    __ompt_event_callback(ompt_event_task_begin);
+#endif
 
     __ompc_task_set_state(current_task, OMP_TASK_READY);
     if (__ompc_task_is_tied(current_task)) {
@@ -193,6 +235,14 @@ void __ompc_task_wait()
    * were executed work-first order. */
   if (current_task == NULL) return;
 
+#ifdef USE_COLLECTOR_TASK
+  __omp_collector_task = __omp_current_task;
+//  __ompc_set_state(THR_TASK_SUSPEND_STATE);
+//  __ompc_event_callback(OMP_EVENT_THR_BEGIN_SUSPEND_TASK);
+  __ompc_ompt_set_state(THR_TASK_SUSPEND_STATE, ompt_state_wait_taskwait, (ompt_wait_id_t) current_task);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_SUSPEND_TASK, ompt_event_taskwait_begin);
+#endif
+
   team = current_thread->team;
 
   __ompc_task_set_state(current_task, OMP_TASK_WAITING);
@@ -204,6 +254,15 @@ void __ompc_task_wait()
         __ompc_task_switch(next_task);
     }
   }
+
+/* The thread is back executing the previously suspended task "new" */
+#ifdef USE_COLLECTOR_TASK
+  __omp_collector_task = __omp_current_task;
+//  __ompc_event_callback(OMP_EVENT_THR_END_SUSPEND_TASK);
+//  __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_END_SUSPEND_TASK, ompt_event_taskwait_end);
+  __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+#endif
 
   __ompc_task_set_state(current_task, OMP_TASK_RUNNING);
 }
@@ -223,6 +282,12 @@ void __ompc_task_exit()
    * were executed work-first order. */
   if (current_task == NULL) return;
 
+#ifdef USE_COLLECTOR_TASK
+  __omp_collector_task = current_task;
+//  __ompc_ompt_set_state(THR_TASK_FINISH_STATE, ompt_state_work_parallel, 0);
+//  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_FINISH_TASK, ompt_event_task_end);
+#endif
+
   current_thread = __omp_current_v_thread;
   team = current_thread->team;
 
@@ -237,11 +302,7 @@ void __ompc_task_exit()
 
   /* only try to free parent or put it back on queue if it was a deferred
    * task and it has no more children (since child tasks may attempt to update
-   * num_children field of parent when they exit).
-   *
-   * TODO: Actually, there is a possible data race here which could cause the
-   * task to never be freed (very unlikely, though). See the TODO note in
-   * __ompc_task_switch for a possible solution.  */
+   * num_children field of parent when they exit) */
   if (current_task->parent &&
       __ompc_task_is_deferred(current_task->parent) && num_siblings == 0 &&
       __ompc_task_state_is_finished(current_task->parent)) {
@@ -258,6 +319,10 @@ void __ompc_task_exit()
     }
   }
 
+#ifdef USE_COLLECTOR_TASK
+  __ompc_set_state(THR_TASK_FINISH_STATE);
+#endif
+
   /* need to decrement num_blocking_children for parent if this is a deferred
    * task. We put it at the end, to ensure all blocking child tasks have first
    * completed.  */
@@ -265,6 +330,11 @@ void __ompc_task_exit()
   flags = OMP_TASK_IS_DEFERRED | OMP_TASK_BLOCKS_PARENT;
   if (__ompc_task_get_flags(current_task, flags) == flags)
     __ompc_atomic_dec(&current_task->parent->num_blocking_children);
+
+#ifdef USE_COLLECTOR_TASK
+  __omp_collector_task = current_task;
+  __ompc_event_callback(OMP_EVENT_THR_END_FINISH_TASK);
+#endif
 }
 
 void __ompc_task_firstprivates_alloc(void **firstprivates, int size)
@@ -289,6 +359,29 @@ void __ompc_task_switch(omp_task_t *new_task)
   __omp_current_task = new_task;
   new_task->sdepth = orig_task->sdepth + 1;
 
+#ifdef OMPT
+  __ompt_suspended_task_id = orig_task->task_id;
+  __ompt_resumed_task_id = new_task->task_id;
+  __ompt_event_callback(ompt_event_task_switch);
+#endif
+
+#ifdef USE_COLLECTOR_TASK
+  __omp_collector_task = __omp_current_task;
+  omp_v_thread_t *p_vthread = __ompc_get_v_thread_by_num( __omp_myid);
+  OMP_COLLECTOR_API_THR_STATE temp_state =
+      (OMP_COLLECTOR_API_THR_STATE)p_vthread->state;
+  __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+  __ompc_event_callback(OMP_EVENT_THR_BEGIN_EXEC_TASK);
+#endif
+
+
+#ifdef OMPT
+  new_task->frame_s.exit_runtime_frame = __builtin_frame_address(0);
+
+  if(__ompc_task_is_implicit(new_task))
+	  __ompt_event_callback(ompt_event_implicit_task_begin);
+#endif
+
   if (__ompc_task_is_tied(orig_task) &&
       !__ompc_task_state_is_in_barrier(orig_task)) {
     ++(current_thread->num_suspended_tied_tasks);
@@ -298,29 +391,31 @@ void __ompc_task_switch(omp_task_t *new_task)
     new_task->t.func(new_task->firstprivates, new_task->frame_pointer);
   }
 
+#ifdef OMPT
+  new_task->frame_s.reenter_runtime_frame = __builtin_frame_address(0);
+
+  if(__ompc_task_is_implicit(new_task))
+	  __ompt_event_callback(ompt_event_implicit_task_end);
+#endif
+
+
+#ifdef USE_COLLECTOR_TASK
+  __ompc_set_state(temp_state);
+#endif
   Is_True(__ompc_task_state_is_exiting(new_task),
       ("__ompc_task_switch: task returned but not in EXITING state"));
 
   if (new_task->num_children == 0) {
     __ompc_task_delete(new_task);
   } else {
-    /* TODO: There appears to be a data race here. The last child will check
-     * for whether state is in the FINISHED state.  If it checks this before
-     * it can be set here, then new_task will never be freed.
-     *
-     * A possible solution is to do a compare-and-swap operation on the state
-     * field.  Set it to FINISHED if it is in the RUNNING state. At the same
-     * time, the last child will also do a compare-and-swap operation on the
-     * state field, setting it to CHILDLESS if it is in the RUNNING state (in
-     * __ompc_task_exit).
-     *
-     * So, if the returned state value here is CHILDLESS, that means we can
-     * delete the task right here. If it is RUNNING, then we allow the last
-     * child to delete the task.  */
     __ompc_task_set_state(new_task, OMP_TASK_FINISHED);
+    __ompc_unlock(&new_task->lock);
   }
 
   __omp_current_task = orig_task;
+#ifdef USE_COLLECTOR_TASK
+  __omp_collector_task = __omp_current_task;
+#endif
 }
 
 static inline int __ompc_task_cutoff_num_threads()

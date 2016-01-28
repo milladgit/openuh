@@ -2,8 +2,6 @@
 #
 #  OpenMP runtime library to be used in conjunction with Open64 Compiler Suites.
 #
-#  Copyright (C) 2014 University of Houston.  All Rights Reserved.
-#
 #  Copyright (C) 2009 Advanced Micro Devices, Inc.  All Rights Reserved.
 #
 #  Copyright (C) 2003 - 2009 Tsinghua University.
@@ -69,6 +67,11 @@ CFLAGS += -DTARG_$(BUILD_TARGET)
 CXXFLAGS += -DTARG_$(BUILD_TARGET)
 #CFLAGS += -fgnu89-inline
 
+CFLAGS += -DOMPT
+CFLAGS += -DUSE_COLLECTOR_TASK
+
+
+
 OTHER_TASKPOOLS = \
 	omp_task_pool_simple.c \
 	omp_task_pool_simple_2level.c \
@@ -83,6 +86,8 @@ CFILES = \
 	omp_util.c \
 	pcl.c \
 	omp_collector_util.c \
+	ompt.c \
+	ompt_rtl.c \
         omp_xbarrier.c \
 	omp_queue.c \
 	omp_task.c \

@@ -1,8 +1,4 @@
 /*
- * Copyright (C) 2014 University of Houston.  All Rights Reserved.
- */
-
-/*
  * Copyright (C) 2009 Advanced Micro Devices, Inc.  All Rights Reserved.
  */
 
@@ -61,10 +57,49 @@
 #include "pcl.h"
 #include "omp_collector_util.h"
 #include "omp_collector_validation.h"
+
+#include "ompt_rtl.h"
+
 /*To align with the Pathscale OMP lowering, CWG */
 
 unsigned long current_region_id = 0;
 unsigned long current_parent_id = 0;
+
+
+#ifdef OMPT
+
+typedef uint64_t ompt_thread_id_t;
+typedef uint64_t ompt_wait_id_t;
+typedef uint64_t ompt_parallel_id_t;
+typedef uint64_t ompt_task_id_t;
+
+/*
+ * Internal variables for maintianing the correct state of OMPT
+ *
+ * These global variables are used to transfer up-to-date data to
+ * OMPT code section. Callback functions use these data to report
+ * correct values to tools that OMPT uses; especially in parallel_begin.
+ */
+
+ompt_parallel_id_t __ompt_parallel_region_id;
+int __ompt_team_size;
+omp_micro __ompt_entry_func;
+
+/*
+ * End of internal variables
+ */
+
+#endif
+
+
+
+static pthread_mutex_t region_counter_mutex = PTHREAD_MUTEX_INITIALIZER;
+static ompt_parallel_id_t parallel_region_id_counter = 1;
+static inline void __parallel_region_id_generator(omp_team_t *current_team, omp_team_t *parent) {
+    current_team->parallel_region_id = parallel_region_id_counter++;
+    current_team->parent = parent;
+}
+
 
 
 #define debug 0
@@ -121,7 +156,11 @@ int __attribute__ ((__aligned__(CACHE_LINE_SIZE)))__omp_spin_user_lock = 0;
 
 omp_team_t       __omp_root_team;
 omp_u_thread_t * __omp_root_u_thread;
+#ifdef OMPT
+omp_v_thread_t	 __omp_root_v_thread={0,ompt_state_work_parallel,0,NULL,NULL,0,NULL,0,0,0,0,0,0,0,0,0,0,0};
+#else
 omp_v_thread_t	 __omp_root_v_thread={0,THR_SERIAL_STATE,0,NULL,NULL,0,NULL,0,0,0,0,0,0,0,0,0,0,0};
+#endif
 
 pthread_t	     __omp_root_thread_id = -1;
 
@@ -142,7 +181,7 @@ unsigned int numtasks = 0;
 
 static pthread_attr_t	__omp_pthread_attr;
 //static pthread_barrierattr_t __omp_pthread_barrierattr;
-//static volatile int  __omp_exit_now = 0;
+static volatile int  __omp_exit_now = 0;
 
 static pthread_mutex_t __omp_level_1_mutex;
 static pthread_cond_t __omp_level_1_cond;
@@ -172,16 +211,18 @@ void *__ompc_nested_slave(void *_v_thread);
 
 void __ompc_set_state(OMP_COLLECTOR_API_THR_STATE state)
 {
+#ifndef OMPT
   omp_v_thread_t *p_vthread = __ompc_get_v_thread_by_num( __omp_myid);
   p_vthread->state = state;
 
   // omp_v_thread_t *p_vthread =  __ompc_get_current_v_thread();
   //  p_vthread->state = state;
   //  if(debug) printf("Thread %d STATE=%d\n",p_vthread->vthread_id,(int) state);
- 
+#endif
 }
 void __ompc_event_callback(OMP_COLLECTORAPI_EVENT event)
 {
+#ifndef OMPT
   //  omp_v_thread_t *p_vthread =  __ompc_get_current_v_thread();
   //  if(debug) 
   //      printf("Thread %d EVENT=%d STATE=%d\n",p_vthread->vthread_id,
@@ -190,6 +231,7 @@ void __ompc_event_callback(OMP_COLLECTORAPI_EVENT event)
   if( __omp_level_1_team_manager.callbacks[event] && 
                   collector_initialized && (!collector_paused))
     __omp_level_1_team_manager.callbacks[event](event);
+#endif
 }
 
 void 
@@ -1005,11 +1047,15 @@ __ompc_level_1_barrier(const int vthread_id)
   __ompc_task_set_state(current_task, OMP_TASK_IN_BARRIER);
 
   p_vthread->thr_ebar_state_id++;
-  __ompc_set_state(THR_IBAR_STATE);
-  __ompc_event_callback(OMP_EVENT_THR_BEGIN_IBAR);
+  __ompc_ompt_set_state(THR_IBAR_STATE, ompt_state_wait_barrier_implicit, (ompt_wait_id_t) pool);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_IBAR, ompt_event_barrier_begin);
 
   bar_count = &__omp_level_1_team_manager.barrier_count;
   __ompc_atomic_inc(bar_count);
+
+#ifdef OMPT
+  __ompt_event_callback(ompt_event_wait_barrier_begin);
+#endif
 
   for (counter = 0; (*bar_count < team_size) ||
           __ompc_task_pool_num_pending_tasks(pool); counter++) {
@@ -1064,7 +1110,11 @@ __ompc_level_1_barrier(const int vthread_id)
     pthread_mutex_unlock(&__omp_level_1_barrier_mutex);
   }
 
-  __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
+#ifdef OMPT
+  __ompt_event_callback(ompt_event_wait_barrier_end);
+#endif
+
+  __ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_barrier_end);
 }
 
 /* Used for Nested team end parallel barrier. Since
@@ -1086,18 +1136,24 @@ __ompc_exit_barrier(omp_v_thread_t * vthread)
   Is_True((vthread != NULL) && (vthread->team != NULL),
 	  ("bad vthread or vthread->team in nested groups"));
 
+  pool = vthread->team->task_pool;
+
   max_count = __omp_spin_count;
   vthread->thr_ibar_state_id++;
-  __ompc_set_state(THR_IBAR_STATE);
-  __ompc_event_callback(OMP_EVENT_THR_BEGIN_IBAR);
+  __ompc_ompt_set_state(THR_IBAR_STATE, ompt_state_wait_barrier_implicit, (ompt_wait_id_t) pool);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_IBAR, ompt_event_barrier_begin);
 
-  pool = vthread->team->task_pool;
+//  pool = vthread->team->task_pool;
 
   current_task = __omp_current_task;
   __ompc_task_set_state(current_task, OMP_TASK_IN_BARRIER);
 
   bar_count = &vthread->team->barrier_count;
   __ompc_atomic_inc(bar_count);
+
+#ifdef OMPT
+  __ompt_event_callback(ompt_event_wait_barrier_begin);
+#endif
 
   for (counter = 0; (*bar_count < team_size) ||
           __ompc_task_pool_num_pending_tasks(pool); counter++) {
@@ -1149,7 +1205,11 @@ __ompc_exit_barrier(omp_v_thread_t * vthread)
     pthread_mutex_unlock(&vthread->team->barrier_lock);
   }
 
-  __ompc_event_callback(OMP_EVENT_THR_END_IBAR);
+#ifdef OMPT
+  __ompt_event_callback(ompt_event_wait_barrier_end);
+#endif
+
+  __ompc_ompt_event_callback(OMP_EVENT_THR_END_IBAR, ompt_event_barrier_end);
 }
 
 /* The thread function for level_1 slaves*/
@@ -1163,12 +1223,24 @@ __ompc_level_1_slave(void * _uthread_index)
   uthread_index = (long) _uthread_index;
   __omp_myid = uthread_index;
 
-  __ompc_set_state(THR_IDLE_STATE);
-  __ompc_event_callback(OMP_EVENT_THR_BEGIN_IDLE);
+#ifdef OMPT
+  int __ompt_visit_events_after_init = 1;
+
+  omp_v_thread_t *th = &__omp_level_1_team[uthread_index];
+  th->idle_frame = __builtin_frame_address(0);
+
+  __ompt_event_callback(ompt_event_thread_begin);
+#endif
+
+  __ompc_ompt_set_state(THR_IDLE_STATE, ompt_state_idle, 0);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_IDLE, ompt_event_idle_begin);
 
   __ompc_atomic_inc(&__omp_level_1_pthread_count);
 
+
   for(;;) {
+
+
     for( counter = 0; __omp_level_1_team_manager.new_task == new_tasks;
          counter++) {
       if (counter > __omp_spin_count) {
@@ -1180,6 +1252,18 @@ __ompc_level_1_slave(void * _uthread_index)
       }
     }
 
+#ifdef OMPT
+    if(__ompt_visit_events_after_init == 1) {
+    	  omp_v_thread_t *th = &__omp_level_1_team[uthread_index];
+    	  th->idle_frame = __builtin_frame_address(0);
+    	  __ompt_event_callback(ompt_event_thread_begin);
+    	  __ompt_event_callback(ompt_event_idle_begin);
+//    	  __ompc_atomic_inc(&__ompt_check_thread_idle_events_counter);
+    	  __ompt_visit_events_after_init = 0;
+    	  continue;
+    }
+#endif
+
     /* update new_tasks with current count */
     new_tasks = __omp_level_1_team_manager.new_task;
 
@@ -1190,34 +1274,55 @@ __ompc_level_1_slave(void * _uthread_index)
     __omp_current_v_thread = &__omp_level_1_team[uthread_index];
 
     /* The program should exit now? */
-    /*		if (__omp_exit_now == true)
+    if (__omp_exit_now == 1)
 		break;
-    */
 
     /* exe micro_task now */
     if ( __omp_level_1_team[uthread_index].entry_func != NULL) {
 
       /* initialize implicit task for slave thread */
       if (__omp_level_1_team[uthread_index].implicit_task == NULL) {
-        __omp_level_1_team[uthread_index].implicit_task =
-              __ompc_task_new_implicit();
+        __omp_level_1_team[uthread_index].implicit_task = __ompc_task_new_implicit();
       }
       __omp_current_task = __omp_level_1_team[uthread_index].implicit_task;
 
-      __ompc_event_callback(OMP_EVENT_THR_END_IDLE);
-      __ompc_set_state(THR_WORK_STATE);
+      __ompc_ompt_event_callback(OMP_EVENT_THR_END_IDLE, ompt_event_idle_end);
+      __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+
+
+#ifdef OMPT
+      __omp_current_task->frame_s.exit_runtime_frame = __builtin_frame_address(0);
+#endif
+
       __omp_level_1_team[uthread_index].entry_func(
               uthread_index,
               (void *) __omp_level_1_team[uthread_index].frame_pointer);
 
-      __omp_level_1_team[uthread_index].entry_func = NULL;
-      __ompc_level_1_barrier(uthread_index);
+#ifdef OMPT
+      __omp_current_task->frame_s.reenter_runtime_frame = __builtin_frame_address(0);
+#endif
 
-      __ompc_set_state(THR_IDLE_STATE);
-      __ompc_event_callback(OMP_EVENT_THR_BEGIN_IDLE);
+
+      __omp_level_1_team[uthread_index].entry_func = NULL;
+
+      __ompc_ompt_set_state(THR_IDLE_STATE, ompt_state_idle, 0);
+      __ompc_ompt_event_callback(OMP_EVENT_THR_BEGIN_IDLE, ompt_event_idle_begin);
+
+      __ompc_level_1_barrier(uthread_index);
       __omp_exe_mode = OMP_EXE_MODE_SEQUENTIAL;
     }
+
   }
+
+
+#ifdef OMPT
+  __ompt_event_callback(ompt_event_idle_end);
+
+  __ompt_event_callback(ompt_event_thread_end);
+#endif
+
+  __ompc_atomic_dec(&__omp_level_1_pthread_count);
+
 
   return NULL;
 }
@@ -1243,8 +1348,12 @@ __ompc_nested_slave(void * _v_thread)
 
   __omp_current_task = my_vthread->implicit_task;
 
-  __ompc_set_state(THR_IDLE_STATE);
+  __ompc_ompt_set_state(THR_IDLE_STATE, ompt_state_idle, 0);
   /* printf("IDLE called from nested\n"); */
+
+//#ifdef OMPT
+//  __ompt_event_callback(ompt_event_thread_begin);
+//#endif
 
   counter = 0;
   for (counter = 0; my_vthread->team->new_task != 1; counter++) {
@@ -1261,11 +1370,25 @@ __ompc_nested_slave(void * _v_thread)
 
   /* The relationship between vthread, uthread, and team should be OK here*/
 
-  __ompc_event_callback(OMP_EVENT_THR_END_IDLE);
-  __ompc_set_state(THR_WORK_STATE);
+  __ompc_ompt_event_callback(OMP_EVENT_THR_END_IDLE, ompt_event_idle_end);
+  __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+
+
+#ifdef OMPT
+  __omp_current_task->frame_s.exit_runtime_frame = __builtin_frame_address(0);
+#endif
 
   my_vthread->entry_func(my_vthread->vthread_id,
       (char *)my_vthread->frame_pointer);
+
+#ifdef OMPT
+  __omp_current_task->frame_s.reenter_runtime_frame = __builtin_frame_address(0);
+#endif
+
+//#ifdef OMPT
+//  __ompt_event_callback(ompt_event_thread_end);
+//#endif
+
 
   /*TODO: fix the barrier call for nested threads*/
   __ompc_exit_barrier(my_vthread);
@@ -1278,6 +1401,21 @@ __ompc_nested_slave(void * _v_thread)
 void
 __ompc_fini_rtl(void) 
 {
+#ifdef OMPT
+	__ompt_event_callback(ompt_event_runtime_shutdown);
+#endif
+
+	__omp_exit_now = 1;
+    if (__omp_level_1_team_size > 1) {
+      /* Before signal, should make sure that all slaves are ready*/
+      pthread_mutex_lock(&__omp_level_1_mutex);
+      (__omp_level_1_team_manager.new_task)++;
+      pthread_cond_broadcast(&__omp_level_1_cond);
+      pthread_mutex_unlock(&__omp_level_1_mutex);
+    }
+
+    OMPC_WAIT_WHILE(__omp_level_1_pthread_count != 1);
+
   __ompc_destroy_task_pool(__omp_level_1_team_manager.task_pool);
   __ompc_xbarrier_info_destroy(&__omp_level_1_team_manager);
 
@@ -1355,6 +1493,10 @@ __ompc_init_rtl(int num_threads)
   pthread_cond_init(&__omp_level_1_barrier_cond, NULL);
   __ompc_init_spinlock(&_ompc_thread_lock);
 
+
+  pthread_mutex_init(&region_counter_mutex, NULL);
+
+
   __omp_myid = 0;
   __omp_seed = 0;
 
@@ -1385,6 +1527,8 @@ __ompc_init_rtl(int num_threads)
   __omp_level_1_team_manager.loop_count = 0;
   __omp_level_1_team_manager.loop_info_size = 0;
   __omp_level_1_team_manager.loop_info = NULL;
+  __omp_level_1_team_manager.loop_info = NULL;
+  __omp_level_1_team_manager.collector_task_id = 0;
 
   __omp_level_1_team_manager.log2_team_size = log2_threads_to_create;
 
@@ -1406,7 +1550,11 @@ __ompc_init_rtl(int num_threads)
     __omp_level_1_team[i].vthread_id = i;
     __omp_level_1_team[i].single_count = 0;
     __omp_level_1_team[i].loop_count = 0;
+#ifdef OMPT
+    __omp_level_1_team[i].state = ompt_state_overhead;
+#else
     __omp_level_1_team[i].state = THR_OVHD_STATE;
+#endif
     __omp_level_1_team[i].thr_lkwt_state_id=0;     
     __omp_level_1_team[i].thr_ctwt_state_id=0;
     __omp_level_1_team[i].thr_atwt_state_id=0;
@@ -1461,10 +1609,11 @@ __ompc_init_rtl(int num_threads)
     __ompc_bind_pthread_to_cpu(__omp_root_thread_id);
   }
 #endif //TARG_LOONGSON
-  __ompc_event_callback(OMP_EVENT_FORK);
+
+  __ompc_ompt_event_callback(OMP_EVENT_FORK, ompt_event_parallel_begin);
 
   /* why twice? */
-  __ompc_event_callback(OMP_EVENT_FORK);
+  __ompc_ompt_event_callback(OMP_EVENT_FORK, ompt_event_parallel_begin);
 
 /*
  * This routine is called by dynamic loader, which is before
@@ -1524,8 +1673,24 @@ __ompc_init_rtl(int num_threads)
   __omp_max_num_threads -= threads_to_create;
 
   __omp_collector_init();
-
   __omp_rtl_initialized = 1;
+
+  __ompt_track_monitoring = __ompt_is_initialized = (__ompt_get_ompt_env_var() == OMP_TOOL_ENABLED) ? ompt_initialize(ompt_lookup, "3.0", 1) : 0;
+  if(__ompt_is_initialized == 1) {
+		__ompt_check_paired_begin_end();
+
+		if (__omp_level_1_team_size > 1) {
+			/* Before signal, should make sure that all slaves are ready*/
+			pthread_mutex_lock(&__omp_level_1_mutex);
+			(__omp_level_1_team_manager.new_task)++;
+			pthread_cond_broadcast(&__omp_level_1_cond);
+			pthread_mutex_unlock(&__omp_level_1_mutex);
+
+//			OMPC_WAIT_WHILE(__ompt_check_thread_idle_events_counter != __omp_level_1_team_size - 1);
+		}
+
+  }
+
   return threads_to_create;
 }
 
@@ -1600,7 +1765,7 @@ __ompc_expand_level_1_team(int new_num_threads)
   __omp_level_1_team_manager.team_size = new_num_threads;
   __omp_level_1_team_manager.log2_team_size = new_log2_num_threads;
 
-  __ompc_event_callback(OMP_EVENT_FORK);
+  __ompc_ompt_event_callback(OMP_EVENT_FORK, ompt_event_parallel_begin);
 
   __omp_level_1_team_manager.task_pool = 
                     __ompc_expand_task_pool(__omp_level_1_team_manager.task_pool,
@@ -1620,7 +1785,11 @@ __ompc_expand_level_1_team(int new_num_threads)
     __omp_level_1_team[i].team = &__omp_level_1_team_manager;
     __omp_level_1_team[i].single_count = 0;
     __omp_level_1_team[i].loop_count = 0;
+#ifdef OMPT
+    __omp_level_1_team[i].state = ompt_state_overhead;
+#else
     __omp_level_1_team[i].state = THR_OVHD_STATE;
+#endif
     __omp_level_1_team[i].thr_lkwt_state_id=0;     
     __omp_level_1_team[i].thr_ctwt_state_id=0;
     __omp_level_1_team[i].thr_atwt_state_id=0;
@@ -1668,6 +1837,7 @@ __ompc_expand_level_1_team(int new_num_threads)
   __omp_level_1_team_alloc_size = new_num_threads;
 }
 
+
 /* The main fork API. at the first fork, initialize the RTL*/
 void
 __ompc_fork(const int _num_threads, omp_micro micro_task, 
@@ -1687,6 +1857,7 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
   void * stack_pointer;
   unsigned int region_used = 0; // TODO: make it one-bit.
   pthread_attr_t nested_pthread_attr;
+
 
 #if  !(defined TARG_LOONGSON || defined _UH_COARRAYS)
   Is_True(__omp_rtl_initialized != 0,
@@ -1710,15 +1881,26 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     static int first_time = 0;
     if (first_time) {
       current_region_id++;
-      __ompc_set_state(THR_OVHD_STATE);
-      __ompc_event_callback(OMP_EVENT_FORK);
+ 	  __ompc_ompt_set_state(THR_OVHD_STATE, ompt_state_overhead, 0);
+  	  __ompc_ompt_event_callback(OMP_EVENT_FORK, ompt_event_parallel_begin);
     } else {
       first_time=1;
     } 
     */
     current_region_id++;
-    __ompc_set_state(THR_OVHD_STATE);
-    __ompc_event_callback(OMP_EVENT_FORK);
+#ifdef OMPT
+    pthread_mutex_lock(&region_counter_mutex);
+    omp_team_t *t_team = __ompc_get_current_team();
+    __parallel_region_id_generator(t_team, NULL);
+    __ompt_parallel_region_id = t_team->parallel_region_id;
+    __ompt_team_size = t_team->team_size;
+    __ompt_entry_func = micro_task;
+#endif
+    __ompc_ompt_set_state(THR_OVHD_STATE, ompt_state_overhead, 0);
+    __ompc_ompt_event_callback(OMP_EVENT_FORK, ompt_event_parallel_begin);
+#ifdef OMPT
+    pthread_mutex_unlock(&region_counter_mutex);
+#endif
 
     // Adjust the number of the number of thread in the team
     if (num_threads == 0) {
@@ -1768,6 +1950,10 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
       __omp_level_1_team[i].frame_pointer = frame_pointer;
       __omp_level_1_team[i].team_size = __omp_level_1_team_size;
       __omp_level_1_team[i].entry_func = micro_task;
+
+#ifdef OMPT
+      __omp_level_1_team[i].type = ompt_thread_worker;
+#endif
     }
     
     /* TODO: the current team size is incorrect, fix it*/
@@ -1785,6 +1971,9 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     __omp_level_1_pthread[0].task = &(__omp_level_1_team[0]);
 
     __omp_current_v_thread = &__omp_level_1_team[0];
+#ifdef OMPT
+      __omp_level_1_team[0].type = ompt_thread_initial;
+#endif
 
     /* initialize implicit task for master thread of level 1 team */
     if (__omp_level_1_team[0].implicit_task == NULL) {
@@ -1793,8 +1982,20 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
 
     __omp_current_task = __omp_level_1_team[0].implicit_task;
 
-    __ompc_set_state(THR_WORK_STATE);
+    __omp_level_1_team_manager.collector_task_id = 0;
+    __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+
+#ifdef OMPT
+    __omp_current_v_thread->idle_frame = NULL;
+
+//  __ompt_event_callback(ompt_event_thread_begin);
+#endif
+
     micro_task(0, frame_pointer);
+
+#ifdef OMPT
+//    __ompt_event_callback(ompt_event_thread_end);
+#endif
 
     __ompc_level_1_barrier(0);
 
@@ -1802,12 +2003,19 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
        can query for a region id at join without returning 0 when the threads goes to 
        a serial state according to the white paper. 
        This is important for the callstack creation. */
+    __ompc_ompt_set_state(THR_OVHD_STATE, ompt_state_overhead, 0);
 
-     __ompc_set_state(THR_OVHD_STATE);
-     
-    __ompc_event_callback(OMP_EVENT_JOIN);
-    __ompc_set_state(THR_SERIAL_STATE);
+#ifdef OMPT
+    __ompt_parallel_region_id = __omp_level_1_team_manager.parallel_region_id;
+    __ompt_team_size = __omp_level_1_team_manager.team_size;
+#endif
+	__ompc_ompt_event_callback(OMP_EVENT_JOIN, ompt_event_parallel_end);
+    __ompc_ompt_set_state(THR_SERIAL_STATE, ompt_state_work_serial, 0);
+#ifdef OMPT
+    __omp_root_v_thread.state=ompt_state_work_serial;
+#else
     __omp_root_v_thread.state=THR_SERIAL_STATE;
+#endif
 
     __omp_exe_mode = OMP_EXE_MODE_SEQUENTIAL;
     __omp_level_1_pthread[0].task = &__omp_root_v_thread;
@@ -1818,7 +2026,6 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     /* OMP_EXE_MODE_IN_PARALLEL, with nested enable */
     /* nested fork */
     /* Maybe we should also ensure that teamsize != 1*/
-
     int k, log2_num_threads;
     int orig_omp_myid = __omp_myid;
 
@@ -1846,6 +2053,7 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     temp_team.loop_info_size = 0;
     temp_team.loop_info = NULL;
     temp_team.single_count = 0;
+    temp_team.collector_task_id = 0;
 
     temp_team.log2_team_size = log2_num_threads;
 
@@ -1873,8 +2081,22 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     /* TODO: need a global lock*/
     __omp_max_num_threads -= num_threads - 1;
 
-    __ompc_set_state(THR_OVHD_STATE);
-    __ompc_event_callback(OMP_EVENT_FORK);
+#ifdef OMPT
+    pthread_mutex_lock(&region_counter_mutex);
+    __parallel_region_id_generator(&temp_team, __ompc_get_current_team());
+
+    __ompt_parallel_region_id = temp_team.parallel_region_id;
+    __ompt_team_size = temp_team.team_size;
+
+    __ompt_entry_func = micro_task;
+#endif
+
+    __ompc_ompt_set_state(THR_OVHD_STATE, ompt_state_overhead, 0);
+    __ompc_ompt_event_callback(OMP_EVENT_FORK, ompt_event_parallel_begin);
+
+#ifdef OMPT
+    pthread_mutex_unlock(&region_counter_mutex);
+#endif
 
     pthread_attr_init(&nested_pthread_attr);
     pthread_attr_setscope(&nested_pthread_attr, PTHREAD_SCOPE_SYSTEM);
@@ -1897,6 +2119,10 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
       /* implicit task is created in __ompc_nested_slave */
       nest_v_thread_team[i].implicit_task = NULL;
       nest_v_thread_team[i].num_suspended_tied_tasks = 0;
+
+#ifdef OMPT
+      nest_v_thread_team[i].type = ompt_thread_worker;
+#endif
 
       __ompc_init_xbarrier_local_info(&nest_v_thread_team[i].xbarrier_local,
                                      i, &temp_team);
@@ -1940,6 +2166,9 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     current_u_thread->task = &(nest_v_thread_team[0]);
 
     __omp_current_v_thread = &nest_v_thread_team[0];
+#ifdef OMPT
+      nest_v_thread_team[0].type = ompt_thread_initial;
+#endif
 
     /* initialize implicit task for master thread of nested team */
     if (nest_v_thread_team[0].implicit_task == NULL) {
@@ -1950,19 +2179,28 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
 
     /* execution */
     /* A start barrier should also be presented here?*/
-    __ompc_set_state(THR_WORK_STATE);
+    __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
 
     /* set master thread id to 0 in  nested region */
     __omp_myid = 0;
 
+//#ifdef OMPT
+//    __ompt_event_callback(ompt_event_thread_begin);
+//#endif
+
     micro_task(0, frame_pointer);
 
+//#ifdef OMPT
+//    __ompt_event_callback(ompt_event_thread_end);
+//#endif
+
     __ompc_exit_barrier(&(nest_v_thread_team[0]));
+
 
     /* restore original thread id */
     __omp_myid = orig_omp_myid;
 
-    __ompc_set_state(THR_OVHD_STATE);
+    __ompc_ompt_set_state(THR_OVHD_STATE, ompt_state_overhead, 0);
 
 
     for (i=1; i<num_threads; i++) {
@@ -1981,12 +2219,22 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     aligned_free(nest_v_thread_team);
     aligned_free(nest_u_thread_team);
 
+
     current_u_thread->task = original_v_thread;
     __omp_current_v_thread  = original_v_thread;
     __omp_current_task = original_task;
 
-	__ompc_event_callback(OMP_EVENT_JOIN);
-	__ompc_set_state(THR_WORK_STATE);
+#ifdef OMPT
+    pthread_mutex_lock(&region_counter_mutex);
+    __ompt_parallel_region_id = temp_team.parallel_region_id;
+    __ompt_team_size = temp_team.team_size;
+#endif
+    __ompc_ompt_event_callback(OMP_EVENT_JOIN, ompt_event_parallel_end);
+    __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+#ifdef OMPT
+    pthread_mutex_unlock(&region_counter_mutex);
+#endif
+
     __omp_exe_mode = OMP_EXE_MODE_NORMAL;
 
   } else { /* OMP_EXE_MODE_IN_PARALLEL and nested disabled*/
@@ -2038,8 +2286,10 @@ __ompc_fork(const int _num_threads, omp_micro micro_task,
     /* a lock should be added here */
     __omp_exe_mode = OMP_EXE_MODE_NESTED_SEQUENTIAL;
     /* execute the task */
-    __ompc_set_state(THR_WORK_STATE);
-    __ompc_set_state(THR_WORK_STATE);
+//    __ompc_set_state(THR_WORK_STATE);
+//    __ompc_set_state(THR_WORK_STATE);
+    __ompc_ompt_set_state(THR_WORK_STATE, ompt_state_work_parallel, 0);
+
     micro_task(0, frame_pointer);
 
     /* lock should be added here */
